@@ -1,15 +1,15 @@
-import os
+import logging
 import json
 import time 
 import configparser
+import os
 from azure.servicebus import ServiceBusClient, ServiceBusMessage
+import azure.functions as func
+
 from azure.keyvault.secrets import SecretClient
 from azure.identity import ClientSecretCredential
 import cx_Oracle
 
-
-#CONNECTION_STR = "<NAMESPACE CONNECTION STRING>"
-#QUEUE_NAME = "<QUEUE NAME>"
 
 def get_config(config_file='config.ini'):
     config = configparser.ConfigParser()
@@ -19,7 +19,7 @@ def get_config(config_file='config.ini'):
     return CONNECTION_STR, QUEUE_NAME
 
 
-
+## Key Valut data
 def get_from_keyvault(secret_name):
     """
     CLIENT_ID = config('CLIENT_ID')
@@ -53,11 +53,33 @@ DB_SID = get_from_keyvault(secret_name='func-db-sid')
 
 db_connection_string = f"{DB_HOST}:{DB_PORT}/{DB_SID}"
 
-orcl = cx_Oracle.connect(
+
+try:
+#create a connection
+    conn = cx_Oracle.connect(
     DB_USERNAME,
     DB_PASSWORD,
     db_connection_string)
 
+except Exception as err:
+    print('exception occured while creating a connection', err)
+else:
+    def data_load_prc(sender):    
+        try:
+            cur=conn.cursor()
+            data = ['input value1',' input value2']
+            cur.callproc('Proc Name', data)
+
+        except Exception as err :
+            print('exception raised while execting the proc call', err)
+        else:
+            print('Procedure executed.')
+
+        finally:
+            cur.close()    
+finally:        
+        conn.close()
+        
 
 def send_single_message(sender):
     message = ServiceBusMessage("Single Message")
@@ -65,7 +87,7 @@ def send_single_message(sender):
     print("Sent a single message")
 
 def send_a_list_of_messages(sender):
-    messages = [ServiceBusMessage("Message in list") for _ in range(1)]
+    messages = [ServiceBusMessage("Message in list") for _ in range(10)]
     sender.send_messages(messages)
     print("Sent a list of 5 messages")
 
@@ -85,19 +107,30 @@ CONNECTION_STR, QUEUE_NAME = get_config()
 
 servicebus_client = ServiceBusClient.from_connection_string(conn_str=CONNECTION_STR, logging_enable=True)
 
+# procedure messages to service bus queue
 with servicebus_client:
     sender = servicebus_client.get_queue_sender(queue_name=QUEUE_NAME)
     with sender:
-        send_single_message(sender)
+        message = send_single_message(sender)
         send_a_list_of_messages(sender)
         send_batch_message(sender)
 
 print("Done sending messages")
 print("-----------------------")
 
-with servicebus_client:
-    receiver = servicebus_client.get_queue_receiver(queue_name=QUEUE_NAME, max_wait_time=5)
-    with receiver:
-        for msg in receiver:
-            print("Received: " + str(msg))
-            receiver.complete_message(msg)
+
+            
+#Consuming the message from Service Bus 
+def main(msg: func.ServiceBusMessage):
+    with servicebus_client:
+        receiver = servicebus_client.get_queue_receiver(queue_name=QUEUE_NAME, max_wait_time=5)
+        with receiver:
+            for msg in receiver:
+                print("Received: " + str(msg))
+                receiver.complete_message(msg)
+                #Pass the queue message to database table
+                data_load_prc(msg)
+                logging.info('Python ServiceBus queue trigger processed message: %s',
+                     msg.get_body().decode('utf-8'))
+            
+    
